@@ -59,6 +59,9 @@ func (replica *Replica) Sign(block Block) Block {
 
 // Run the Replica until the done channel is closed.
 func (replica *Replica) Run(done <-chan struct{}) {
+	// init sending server
+	// init receving server
+	// sync them first?
 	for {
 		// TODO:
 		// 1. Generate the next Block in the blockchain whenever the
