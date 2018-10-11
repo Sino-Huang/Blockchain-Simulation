@@ -2,6 +2,7 @@ package main
 
 import (
 	"time"
+	"fmt"
 )
 
 type Replica struct {
@@ -59,10 +60,65 @@ func (replica *Replica) Sign(block Block) Block {
 
 // Run the Replica until the done channel is closed.
 func (replica *Replica) Run(done <-chan struct{}) {
-	// init sending server
-	// init receving server
-	// sync them first?
+	// make new Block buffer
+	NBB := make(chan Block, 30)
+	// make Query Buffer
+	QB := make(chan Query, 30)
+	// make Blocks Buffer
+	BSB := make(chan Blocks, 30)
+	// inform changes channel
+	InformChange := make(chan Blocks)
+	go	func() {
+			for{
+				theTime :=<-replica.blockGenerator
+				//generate next block
+				NB := NewBlock(replica.blockchains.EndOfLongestBlockchain().Header, replica.blockchains.EndOfLongestBlockchain().Height + 1, int64(theTime.Second()))
+				fmt.Println("Id:", replica.id, "New Block is",NB)
+				NBB <- NB
+			}
+		}()
+	go	func(){
+			for{
+				theQuery :=<-replica.blockQueryReceiver
+				fmt.Println("Incoming Query is", theQuery)
+				QB <- theQuery
+			}
+		}()
+	go func() {
+			for{
+				theBlocks := <-replica.blockReceiver
+				fmt.Println("Incoming Blocks is", theBlocks)
+				BSB <- theBlocks
+			}
+		}()
+	// deal with new Blocks
+	go func() {
+		for {
+			replica.blockchains.ReplaceEndOfLongestBlockchain(<- NBB)
+			// send to others
+			NBS := NewBlocks()
+			for _, v := range replica.blockchains.blocks  {
+				NBS.Append(v)
+			}
+			// inform sending chan
+			fmt.Println("Prepare BS is", NBS)
+			InformChange <- NBS
+		}
+	}()
+
+
 	for {
+		// check whether end
+		select {
+		case <-done:
+			return // means everything is done
+		default:
+			ReadyBS := <- InformChange // this will block the for loop when no Ready BS comming in
+			fmt.Println("ReadyBS is", ReadyBS)
+			for _, v := range replica.conns{
+				v <- ReadyBS
+			}
+		}
 		// TODO:
 		// 1. Generate the next Block in the blockchain whenever the
 		//    blockGenerator channel signals that it is time to do so.
