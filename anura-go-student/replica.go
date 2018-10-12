@@ -67,20 +67,25 @@ func (replica *Replica) Run(done <-chan struct{}) {
 	// make Blocks Buffer
 	BSB := make(chan Blocks, 30)
 	// inform changes channel
-	InformChange := make(chan Blocks)
+	ReadytoSendchan := make(chan Blocks)
+
+	ConsensusBlocks := NewBlocks() // these are the blocks that wants to make consensus
+	WaitingBlocks := NewBlocks()   // these are the local blocks that waits to append to the blockchain
+	/*********************************************
+	the block below is the receiving tasks
+	 */
 	go	func() {
 			for{
 				theTime :=<-replica.blockGenerator
 				//generate next block
 				NB := NewBlock(replica.blockchains.EndOfLongestBlockchain().Header, replica.blockchains.EndOfLongestBlockchain().Height + 1, int64(theTime.Second()))
-				fmt.Println("Id:", replica.id, "New Block is",NB)
+				fmt.Println("Id:", replica.id, "New Block Coming")
 				NBB <- NB
 			}
 		}()
 	go	func(){
 			for{
 				theQuery :=<-replica.blockQueryReceiver
-				fmt.Println("Incoming Query is", theQuery)
 				QB <- theQuery
 			}
 		}()
@@ -91,18 +96,7 @@ func (replica *Replica) Run(done <-chan struct{}) {
 				BSB <- theBlocks
 			}
 		}()
-	// deal with new Blocks
-	go func() {
-		for {
-			replica.blockchains.ReplaceEndOfLongestBlockchain(<- NBB)
-			// send to others
-			NBS := replica.blockchains.LongestBlockchain()
-			// inform sending chan
-			fmt.Println("Prepare BS is", NBS)
-			InformChange <- NBS
-		}
-	}()
-
+	/****************************************/
 	go func() { // deal with Query
 		for{
 			theQuery := <-QB
@@ -112,12 +106,52 @@ func (replica *Replica) Run(done <-chan struct{}) {
 		}
 	}()
 
-	go func() { // deal with incoming blocks
-		//for{
-		//	theBlocks := <-BSB
-		//
-		//}
+	go func() {// deal with new Blocks
+		for {
+			NB:=<-NBB
+			ReadytoSendchan <- NewBlocks().Append(NB)
+			ConsensusBlocks.Append(NB)
+			WaitingBlocks.Append(NB)
+		}
 	}()
+
+	go func() { // deal with incoming blocks
+		for{
+			theBlocks := <-BSB
+			// if theBlocks size is 1. then it is the new block broad cast by other replica
+			if len(theBlocks.Blocks) == 1{
+				// check if it is already in ConsensusBlock
+				flag := true
+				for _,v := range ConsensusBlocks.Blocks{
+					if v.Signature.Authority() == theBlocks.Latest().Signature.Authority(){
+						flag = false;
+					}
+				}
+				if flag {
+					ConsensusBlocks.Append(theBlocks.Latest())
+				}
+				//help to broadcast to
+				ReadytoSendchan <- theBlocks
+			}else {
+				// means it is the blockchain comming
+				if len(theBlocks.Blocks) < len(replica.blockchains.LongestBlockchain().Blocks) {
+					// broad cast the local blockchain again
+					ReadytoSendchan <- replica.blockchains.LongestBlockchain()
+				}else {
+					// check difference and update
+				}
+			}
+
+
+		}
+	}()
+	go func() { // make consensus each step duration
+		for{
+			time.Sleep(time.Duration(replica.stepDuration) * time.Second)
+			// check consensus blocks
+		}
+	}()
+
 
 
 	for {
@@ -125,11 +159,25 @@ func (replica *Replica) Run(done <-chan struct{}) {
 		select {
 		case <-done:
 			return // means everything is done
-		case ReadyBS := <- InformChange: // this will block the for loop when no Ready BS comming in
-			fmt.Println("ReadyBS is", ReadyBS)
+		case ReadyBS := <-ReadytoSendchan: // this will block the for loop when no Ready BS comming in
+			// update the ready BS
+			// if BS is 1 length, then broadcast it
+			if len(ReadyBS.Blocks) > 1 {
+
+			}
+
+			// send out the ready new Blockchain
 			for _, v := range replica.conns{
 				go func() { // make the sending loop concurrent so that it will not block the main program
-					v <- ReadyBS
+					timeout := make(chan bool)
+					go func() {
+						time.Sleep(10 * time.Second)
+						timeout <- true
+					}()
+					select {
+					case v <- ReadyBS: // in case the connection is broken, we use timeout mechanism
+					case <-timeout:
+					}
 				}()
 			}
 		}
