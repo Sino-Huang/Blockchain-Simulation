@@ -96,14 +96,27 @@ func (replica *Replica) Run(done <-chan struct{}) {
 		for {
 			replica.blockchains.ReplaceEndOfLongestBlockchain(<- NBB)
 			// send to others
-			NBS := NewBlocks()
-			for _, v := range replica.blockchains.blocks  {
-				NBS.Append(v)
-			}
+			NBS := replica.blockchains.LongestBlockchain()
 			// inform sending chan
 			fmt.Println("Prepare BS is", NBS)
 			InformChange <- NBS
 		}
+	}()
+
+	go func() { // deal with Query
+		for{
+			theQuery := <-QB
+			theBlocks := replica.blockchains.LongestBlockchain()
+			outputBlocks := theBlocks.Range(theQuery.Begin,theQuery.End)
+			theQuery.Responder <- outputBlocks // send back to the query
+		}
+	}()
+
+	go func() { // deal with incoming blocks
+		//for{
+		//	theBlocks := <-BSB
+		//
+		//}
 	}()
 
 
@@ -112,11 +125,12 @@ func (replica *Replica) Run(done <-chan struct{}) {
 		select {
 		case <-done:
 			return // means everything is done
-		default:
-			ReadyBS := <- InformChange // this will block the for loop when no Ready BS comming in
+		case ReadyBS := <- InformChange: // this will block the for loop when no Ready BS comming in
 			fmt.Println("ReadyBS is", ReadyBS)
 			for _, v := range replica.conns{
-				v <- ReadyBS
+				go func() { // make the sending loop concurrent so that it will not block the main program
+					v <- ReadyBS
+				}()
 			}
 		}
 		// TODO:

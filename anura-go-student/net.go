@@ -52,7 +52,6 @@ func Serve(authority Authority, addr string) (<-chan Blocks, <-chan Query) {
 		if configAttack && len(blocks.Blocks) > 0 {
 			x := rand.Intn(10)
 			if x < 4 {
-				storedB := blocks.Blocks[len(blocks.Blocks)-1]
 				b := blocks.Blocks[len(blocks.Blocks)-1]
 				switch x {
 				// Change signature
@@ -82,8 +81,6 @@ func Serve(authority Authority, addr string) (<-chan Blocks, <-chan Query) {
 					b = GenesisBlock()
 				}
 				blocks.Blocks[len(blocks.Blocks)-1] = b
-				blockReceiver <- blocks
-				blocks.Blocks[len(blocks.Blocks)-1] = storedB
 				blockReceiver <- blocks
 				return
 			}
