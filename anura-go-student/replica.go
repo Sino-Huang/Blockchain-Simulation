@@ -154,7 +154,7 @@ func (replica *Replica) Run(done <-chan struct{}) {
 				bcupdatemutex.RLock()
 				Temp := replica.blockchains.endOfLongestBlockchain
 				bcupdatemutex.RUnlock()
-				if theBlocks.Latest().Timestamp < time.Now().Unix() &&(theBlocks.Latest().Height > Temp.Height+1 || (theBlocks.Latest().Height == Temp.Height+1 && theBlocks.Latest().ParentHeader == Temp.Header)) { // verify the incoming block
+				if theBlocks.Latest().Timestamp < time.Now().Unix() && theBlocks.Latest().Timestamp > Temp.Timestamp &&(theBlocks.Latest().Height > Temp.Height+1 || (theBlocks.Latest().Height == Temp.Height+1 && theBlocks.Latest().ParentHeader == Temp.Header)) { // verify the incoming block
 					// check if it is already in ConsensusBlock
 					flag := true
 					consensusbmutex.RLock()
@@ -205,17 +205,8 @@ func (replica *Replica) Run(done <-chan struct{}) {
 							delete(replica.blockchains.blocks, Temp.Header)
 							if Temp.Signature.Authority() == replica.id {
 								// readding the block into waiting list
-								NWB := NewBlocks()
-								Length := len(WaitingBlocks.Blocks)
-								if Length < 2 {
-									NWB = WaitingBlocks.Append(Temp)
-								} else {
-									NWB = NWB.Append(WaitingBlocks.Blocks[0])
-									NWB = NWB.Append(Temp)
-									NWB.Blocks = append(NWB.Blocks, WaitingBlocks.Blocks[1:]...)
-								}
-
-								WaitingBlocks = NWB
+								Temp.Timestamp = time.Now().Unix()
+								WaitingBlocks = WaitingBlocks.Append(Temp)
 							}
 						}
 
@@ -400,6 +391,10 @@ func CheckValid(theBlocks *Blocks, authorities []Authority, blockchains *Blockch
 		} else {
 			if theBlocks.Blocks[i].ParentHeader != theBlocks.Blocks[i-1].Header || strings.Split(string(theBlocks.Blocks[i].Signature), ":")[0] != string(theBlocks.Blocks[i].Header) {
 				fmt.Println("Invalid Header! Abandon the request!")
+				return false, -1
+			}
+			if theBlocks.Blocks[i].Timestamp < theBlocks.Blocks[i-1].Timestamp{
+				fmt.Println("Invalid TimeStamp! Abandon the request!")
 				return false, -1
 			}
 			if theBlocks.Blocks[i].Height == LocalHeight {
