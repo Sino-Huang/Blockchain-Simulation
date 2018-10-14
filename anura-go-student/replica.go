@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"strings"
+	"github.com/republicprotocol/co-go"
 )
 
 type Replica struct {
@@ -35,6 +36,7 @@ type Replica struct {
 	stepDuration int64
 }
 
+
 func NewReplica(id Authority, authorities []Authority, blockReceiver <-chan Blocks, blockQueryReceiver <-chan Query, blockGenerator <-chan time.Time, conns []chan<- Blocks) Replica {
 	return Replica{
 		id: id,
@@ -62,12 +64,10 @@ func (replica *Replica) Sign(block Block) Block {
 
 // Run the Replica until the done channel is closed.
 func (replica *Replica) Run(done <-chan struct{}) {
-	// make new Block buffer
-	NBB := make(chan time.Time, 500)
 	// make Blocks Buffer
 	BSB := make(chan Blocks, 500)
 	// inform changes channel
-	ReadytoSendchan := make(chan Blocks)
+	ReadytoSendchan := make(chan Blocks, 100)
 	bcupdatemutex := sync.RWMutex{}
 	consensusbmutex := sync.RWMutex{}
 	waitingbmutex := sync.RWMutex{}
@@ -79,30 +79,12 @@ func (replica *Replica) Run(done <-chan struct{}) {
 	the block below is the receiving tasks
 	 */
 	go func() {
-		for {
-			theTime := <-replica.blockGenerator
-			time.Sleep(time.Duration(replica.stepDuration) * time.Second) // lower down the writen-in process so that it can receive latest longer blockchain
-			NBB <- theTime
-		}
-	}()
-	go func() { // deal with query
-		for {
-			theQuery := <-replica.blockQueryReceiver
-			bcupdatemutex.RLock()
-			theBlocks := replica.blockchains.LongestBlockchain()
-			bcupdatemutex.RUnlock()
-			outputBlocks := theBlocks.Range(theQuery.Begin, theQuery.End)
-			theQuery.Responder <- outputBlocks // send back to the query
-		}
-	}()
-
-	go func() {
 		duration := replica.stepDuration
 		cbmutex := sync.RWMutex{}
 		var chainBlocks []Blocks
 		go func() {
 			for {
-				time.Sleep(time.Duration(duration) * time.Second)
+				time.Sleep(time.Duration(duration / 2) * time.Second)
 				if len(chainBlocks) > 0 {
 					cbmutex.Lock()
 					theLong := chainBlocks[0]
@@ -126,6 +108,18 @@ func (replica *Replica) Run(done <-chan struct{}) {
 				chainBlocks = append(chainBlocks, TheB) // buffer the chains
 				cbmutex.Unlock()
 			}
+			//BSB <-<- replica.blockReceiver
+		}
+	}()
+
+	go func() { // deal with query
+		for {
+			theQuery := <-replica.blockQueryReceiver
+			bcupdatemutex.RLock()
+			theBlocks := replica.blockchains.LongestBlockchain()
+			bcupdatemutex.RUnlock()
+			outputBlocks := theBlocks.Range(theQuery.Begin, theQuery.End)
+			theQuery.Responder <- outputBlocks // send back to the query
 		}
 	}()
 
@@ -133,18 +127,16 @@ func (replica *Replica) Run(done <-chan struct{}) {
 
 	go func() { // deal with new Blocks
 		for {
-			theTime := <-NBB
+			theTime := <-replica.blockGenerator
 			//generate next block
 			consensusbmutex.Lock()
 			bcupdatemutex.Lock()
 			waitingbmutex.Lock()
 			NB := NewBlock(replica.blockchains.EndOfLongestBlockchain().Header, replica.blockchains.EndOfLongestBlockchain().Height+1, theTime.Unix())
-			NB = replica.Sign(NB)
 			WaitingBlocks = WaitingBlocks.Append(NB)
 			if len(WaitingBlocks.Blocks) == 1 { // broad cast this new block so as to make consensus
-				ConsensusBlocks = ConsensusBlocks.Append(NB)
-				ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
-				ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
+				WaitingBlocks.Blocks[0] = replica.Sign(WaitingBlocks.Blocks[0])
+				ConsensusBlocks = ConsensusBlocks.Append(WaitingBlocks.Blocks[0])
 				ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
 			}
 			waitingbmutex.Unlock()
@@ -162,7 +154,7 @@ func (replica *Replica) Run(done <-chan struct{}) {
 				bcupdatemutex.RLock()
 				Temp := replica.blockchains.endOfLongestBlockchain
 				bcupdatemutex.RUnlock()
-				if theBlocks.Latest().Height > Temp.Height+1 || (theBlocks.Latest().Height == Temp.Height+1 && theBlocks.Latest().ParentHeader == Temp.Header) { // if the comming block is not outdated, help to broadcast, else broadcast the newest blockchain
+				if theBlocks.Latest().Timestamp < time.Now().Unix() &&(theBlocks.Latest().Height > Temp.Height+1 || (theBlocks.Latest().Height == Temp.Height+1 && theBlocks.Latest().ParentHeader == Temp.Header)) { // verify the incoming block
 					// check if it is already in ConsensusBlock
 					flag := true
 					consensusbmutex.RLock()
@@ -175,25 +167,22 @@ func (replica *Replica) Run(done <-chan struct{}) {
 					if flag {
 						consensusbmutex.Lock()
 						ConsensusBlocks = ConsensusBlocks.Append(theBlocks.Latest())
-						//help to broadcast if it is the first time
-						ReadytoSendchan <- theBlocks
-						ReadytoSendchan <- theBlocks
-						ReadytoSendchan <- theBlocks
 						consensusbmutex.Unlock()
+						//help to broadcast if it is the first time ****** or do not help as it may produce duplicate message ******
+						//ReadytoSendchan <- theBlocks
 					}
-				} else if theBlocks.Latest().Height < Temp.Height+1 { // it means someone is outdated, thus broadcast local blockchain to help it
-					bcupdatemutex.RLock()
-					ReadytoSendchan <- replica.blockchains.LongestBlockchain()
-					ReadytoSendchan <- replica.blockchains.LongestBlockchain()
-					bcupdatemutex.RUnlock()
-				}
+				}// else if theBlocks.Latest().Height < Temp.Height+1 { // it means someone is outdated, thus broadcast local blockchain to help it ****** or do not help as it may produce duplicate message ******
+				//	bcupdatemutex.RLock()
+				//	ReadytoSendchan <- replica.blockchains.LongestBlockchain()
+				//	bcupdatemutex.RUnlock()
+				//}
 
 			} else {
 				// means it is the blockchain comming
 				bcupdatemutex.RLock()
-				Temp := len(replica.blockchains.LongestBlockchain().Blocks)
+				Temp := replica.blockchains.LongestBlockchain()
 				bcupdatemutex.RUnlock()
-				if len(theBlocks.Blocks) > Temp {
+				if len(theBlocks.Blocks) > len(Temp.Blocks) {
 					/**
 					this function verify the incoming blocks and then update if the incoming block is valid
 					In branch conflicts, the function will also help to re-input the invalid block into waiting blocks list
@@ -207,9 +196,7 @@ func (replica *Replica) Run(done <-chan struct{}) {
 					isValid, divergeHeight := CheckValid(&theBlocks, replica.authorities, &replica.blockchains)
 					if isValid {
 						//preheight := replica.blockchains.endOfLongestBlockchain.Height
-						ReadytoSendchan <- replica.blockchains.LongestBlockchain() //  help to broadcast the longest chain
-						ReadytoSendchan <- replica.blockchains.LongestBlockchain() //  help to broadcast the longest chain
-						ReadytoSendchan <- replica.blockchains.LongestBlockchain() //  help to broadcast the longest chain
+						//ReadytoSendchan <- theBlocks //  help to broadcast the longest chain ****** or do not help as it may produce duplicate message ******
 						// delete invalid local blocks and readding the block into waiting list
 						heightrange := replica.blockchains.endOfLongestBlockchain.Height - divergeHeight
 						for i := 0; i < int(heightrange); i++ {
@@ -256,25 +243,20 @@ func (replica *Replica) Run(done <-chan struct{}) {
 								ConsensusBlocks = ConsensusBlocks.Append(TempBlock)
 								// sending the new Block request
 								ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
-								ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
-								ReadytoSendchan <- NewBlocks().Append(WaitingBlocks.Blocks[0])
 							}
 						}
 					}
 					waitingbmutex.Unlock()
 					bcupdatemutex.Unlock()
 					consensusbmutex.Unlock()
-				} else { // it means someone is outdated, thus broadcast local blockchain to help it
-					bcupdatemutex.RLock()
-					ReadytoSendchan <- replica.blockchains.LongestBlockchain() // re-broadcast the longest block chain
-					ReadytoSendchan <- replica.blockchains.LongestBlockchain() // re-broadcast the longest block chain
-					bcupdatemutex.RUnlock()
-				}
+				} //else if len(theBlocks.Blocks) < len(Temp.Blocks){ // it means someone is outdated, thus broadcast local blockchain to help it ****** or do not help as it may produce duplicate message ******
+					//ReadytoSendchan <- Temp // re-broadcast the longest block chain
+				//}
 			}
 
 		}
 	}()
-	go func() { // make consensus each step duration
+	go func() { // make consensus and produce the consensus block at each step duration
 		for {
 			time.Sleep(time.Until(Timer))
 			Timer = Timer.Add(time.Duration(replica.stepDuration) * time.Second)
@@ -297,27 +279,28 @@ func (replica *Replica) Run(done <-chan struct{}) {
 			}
 			if index != -1 {
 				//fmt.Println(replica.id,"Consensus Block is", ConsensusBlocks.Blocks[index].Signature, ConsensusBlocks.Blocks[index].Height, replica.blockchains.endOfLongestBlockchain.Height)
-				// all replicate delete the target block too in case the target authority accidentally crash and hence cause deadlock
+				// all replicates delete the target block in their consensus blocks group ,
 				Temp := NewBlocks()
 				Temp.Blocks = append(Temp.Blocks, ConsensusBlocks.Blocks[:index]...)
 				Temp.Blocks = append(Temp.Blocks, ConsensusBlocks.Blocks[index+1:]...)
 				ConsensusBlocks = Temp
-
-				//replica.blockchains.ReplaceEndOfLongestBlockchain(SeniorB.Latest())
-				//ReadytoSendchan <- replica.blockchains.LongestBlockchain()
-				// delete the block in the waiting block ,update Waiting blocks
+				//but only the responsible replicate update the blockchain in case of Hacking issue
 				if SeniorB.Latest().Signature.Authority() == replica.id {
 					// check the local waiting list to check whether this is a fake message
 					if len(WaitingBlocks.Blocks) == 0 {
-						fmt.Println("No LocalBackup For Consensus Block! Potential FAKE, Abandon the Block")
-					} else if WaitingBlocks.Blocks[0].Signature != SeniorB.Latest().Signature || WaitingBlocks.Blocks[0].Timestamp != SeniorB.Latest().Timestamp {
-						fmt.Println("Consensus Block'TimeStamp is not same as the LocalBackup's! Potential FAKE, Abandon the Block")
+						fmt.Println("No LocalBackup For Consensus Block! Potential FAKE, Abandon the Block!")
+					} else if WaitingBlocks.Blocks[0].Signature != SeniorB.Latest().Signature ||
+						WaitingBlocks.Blocks[0].Header != SeniorB.Latest().Header ||
+						WaitingBlocks.Blocks[0].ParentHeader != SeniorB.Latest().ParentHeader ||
+						WaitingBlocks.Blocks[0].Timestamp != SeniorB.Latest().Timestamp ||
+						WaitingBlocks.Blocks[0].Height != SeniorB.Latest().Height{
+						fmt.Println("Consensus Block is not same as the LocalBackup! Potential FAKE, Abandon the Block!")
 					} else {
 						replica.blockchains.ReplaceEndOfLongestBlockchain(SeniorB.Latest())
 						ReadytoSendchan <- replica.blockchains.LongestBlockchain()
-						ReadytoSendchan <- replica.blockchains.LongestBlockchain()
-						ReadytoSendchan <- replica.blockchains.LongestBlockchain()
 						//fmt.Println(replica.id, "Made a new block")
+
+						// delete the block in the waiting block ,update Waiting blocks
 						NWB := NewBlocks()
 						NWB.Blocks = append(NWB.Blocks, WaitingBlocks.Blocks[1:]...)
 						if len(NWB.Blocks) > 0 { // New Block Consensus condition
@@ -326,8 +309,6 @@ func (replica *Replica) Run(done <-chan struct{}) {
 							// re-input the new waiting block into consensus block and send it out.
 							ConsensusBlocks = ConsensusBlocks.Append(NWB.Blocks[0])
 
-							ReadytoSendchan <- NewBlocks().Append(NWB.Blocks[0])
-							ReadytoSendchan <- NewBlocks().Append(NWB.Blocks[0])
 							ReadytoSendchan <- NewBlocks().Append(NWB.Blocks[0])
 						}
 
@@ -358,19 +339,27 @@ func (replica *Replica) Run(done <-chan struct{}) {
 			return // means everything is done
 		case ReadyBS := <-ReadytoSendchan: // this will block the for loop when no Ready BS comming in
 			// send out the ready new Blockchain
-			for _, v := range replica.conns {
-				go func() { // make the sending loop concurrent so that it will not block the main program
-					timeout := make(chan bool)
-					go func() {
-						time.Sleep(15 * time.Second) // after 15 Sec if the channel is not active then timeout
-						timeout <- true
-					}()
-					select {
-					case v <- ReadyBS: // in case the connection is broken, we use timeout mechanism
-					case <-timeout:
-						//fmt.Println("Connection timeout")
-					}
-				}()
+			timeout := make(chan bool)
+			success := make(chan bool)
+			go func() {
+				time.Sleep(time.Duration(replica.stepDuration) * time.Second) // after step duration Sec if the channel is not active then timeout
+				timeout <- true
+			}()
+			go func() {
+				// **** NOTE *****
+				// I was thinking use goroutine to send message concurrently. However, i found out that if the number of goroutine increases
+				// , then it is highly possible that starvation happens!
+				// therefore I do not create too many goroutines
+				co.ForAll(len(replica.conns), func(i int) {
+					replica.conns[i] <- ReadyBS
+				})
+				success <- true
+			}()
+			select {
+			case <-success:
+				//fmt.Println("Success")
+			case <-timeout:
+				//fmt.Println("Timeout")
 			}
 		}
 	}
@@ -378,16 +367,24 @@ func (replica *Replica) Run(done <-chan struct{}) {
 func CheckValid(theBlocks *Blocks, authorities []Authority, blockchains *Blockchains) (bool, int64) {
 	defer func() (bool, int64) {
 		if r := recover(); r != nil {
-			fmt.Println(r)
+			fmt.Println(r, "Abandon the request!")
 			return false, -1
 		}
 		return false, -1
 	}()
 	LocalHeight := blockchains.endOfLongestBlockchain.Height
 	LocalDivergeBlock := blockchains.endOfLongestBlockchain
+	if theBlocks.Blocks[0].Header != blockchains.LongestBlockchain().Blocks[0].Header || theBlocks.Blocks[0].ParentHeader != blockchains.LongestBlockchain().Blocks[0].ParentHeader {
+		return false, -1 // verify first block
+	}
+
 	for i := len(theBlocks.Blocks) - 1; i > 0; i-- {
 		if theBlocks.Blocks[i].Timestamp > time.Now().Unix() {
-			fmt.Println("Invalid TimeStamp! Abandon the request!")
+			fmt.Println("Invalid TimeStamp! Abandon the request!", )
+			return false, -1
+		}
+		if len(theBlocks.Blocks[i].Header) < 44 {
+			fmt.Println("Invalid Header! Abandon the request!", len(theBlocks.Blocks[i].Header))
 			return false, -1
 		}
 		flag := true
